@@ -56,3 +56,11 @@ Code and datasets are borrowed from [AKT](https://github.com/arghosh/AKT). Adver
 }
 ``` 
 
+# 評価
+普通のEERNNA
+python main.py --max_iter=15 --dataset 'assist2009'
+0.7726
+
+困難度を並列に追加
+0.7800
+

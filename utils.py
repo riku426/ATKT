@@ -24,7 +24,7 @@ class KTLoss(nn.Module):
 def _l2_normalize_adv(d):
     if isinstance(d, Variable):
         d = d.data.cpu().numpy()
-    elif isinstance(d, torch.FloatTensor) or isinstance(d, torch.cuda.FloatTensor):
+    elif isinstance(d, torch.FloatTensor) or isinstance(d, torch.cpu.FloatTensor):
         d = d.cpu().numpy()
     d /= (np.sqrt(np.sum(d ** 2, axis=(1, 2))).reshape((-1, 1, 1)) + 1e-16)
     return torch.from_numpy(d)

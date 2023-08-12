@@ -11,12 +11,12 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.autograd import Variable, grad
 from model import KT_backbone
-from dataset import DATA, PID_DATA
+from dataset import DATA, PID_DATA, ASSIST_DATA
 from sklearn.metrics import roc_auc_score
 from utils import KTLoss, _l2_normalize_adv
 from pytorchtools import EarlyStopping
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.cuda.is_available() else "cpu")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Script to train KT')
@@ -28,11 +28,21 @@ if __name__ == '__main__':
     parser.add_argument('--hidden-emb-dim', type=int, default=80, help='Dimension of concept embedding.')
     parser.add_argument('--skill-emb-dim', type=int, default=256)
     parser.add_argument('--answer-emb-dim', type=int, default=96)
+    parser.add_argument('--diff-emb-dim', type=int, default=96)
     parser.add_argument('--dataset', type=str, default="assist2015")
     parser.add_argument('--beta', type=float, default=0.2)
     parser.add_argument('--epsilon', type=float, default=10)
     params = parser.parse_args()
     dataset = params.dataset
+    
+    if dataset in {"assist2009"}:
+        params.n_skill = 124
+        params.batch_size = 64
+        params.seqlen = 739
+        params.data_dir = 'dataset/'+dataset
+        params.data_name = dataset
+        params.beta = 0.2
+        params.epsilon=10
     
     if dataset in {"statics"}:
         params.n_skill = 1223
@@ -83,12 +93,17 @@ if __name__ == '__main__':
     auc_test_list=[]
     
     now=time.time()
+    
+    if dataset == 'assist2009':
+        num = 1
+    else:
+        num = 5
 
-    for dataset_set_index in range(5):
+    for dataset_set_index in range(num):
         params.dataset_set_index=dataset_set_index+1
     
         # model
-        net = KT_backbone(params.skill_emb_dim, params.answer_emb_dim, params.hidden_emb_dim, params.n_skill)
+        net = KT_backbone(params.skill_emb_dim, params.answer_emb_dim, params.hidden_emb_dim, params.n_skill, params.diff_emb_dim)
         net=net.to(device)
         
         # optimizer
@@ -99,23 +114,33 @@ if __name__ == '__main__':
         kt_loss = KTLoss()
         
         # dataset
-        if "pid" not in params.data_name:
+        if params.data_name == 'assist2009':
+            dat = ASSIST_DATA(n_question=params.n_skill,
+                           seqlen=params.seqlen, separate_char=',', maxstep=500)
+        elif "pid" not in params.data_name:
             dat = DATA(n_question=params.n_skill,
                        seqlen=params.seqlen, separate_char=',', maxstep=500)
         else:
             dat = PID_DATA(n_question=params.n_skill,
                            seqlen=params.seqlen, separate_char=',', maxstep=500)
-    
-        train_data_path = params.data_dir + "/" + \
-            params.data_name + "_train"+str(params.dataset_set_index)+".csv"
-        valid_data_path = params.data_dir + "/" + \
-            params.data_name + "_valid"+str(params.dataset_set_index)+".csv"
-        test_data_path = params.data_dir + "/" + \
-            params.data_name + "_test"+str(params.dataset_set_index)+".csv"
+        if dataset == 'assist2009':
+            train_data_path = params.data_dir + "/" + \
+                params.data_name + "_train"+".csv"
+            valid_data_path = params.data_dir + "/" + \
+                params.data_name + "_test"+".csv"
+            test_data_path = params.data_dir + "/" + \
+                params.data_name + "_test"+".csv"
+        else:
+            train_data_path = params.data_dir + "/" + \
+                params.data_name + "_train"+str(params.dataset_set_index)+".csv"
+            valid_data_path = params.data_dir + "/" + \
+                params.data_name + "_valid"+str(params.dataset_set_index)+".csv"
+            test_data_path = params.data_dir + "/" + \
+                params.data_name + "_test"+str(params.dataset_set_index)+".csv"
 
-        train_skill_data, train_answer_data = dat.load_data(train_data_path)
-        val_skill_data, val_answer_data = dat.load_data(valid_data_path)
-        test_skill_data,  test_answer_data = dat.load_data(test_data_path)
+        train_skill_data, train_answer_data, train_diff_data = dat.load_data(train_data_path)
+        val_skill_data, val_answer_data, val_diff_data = dat.load_data(valid_data_path)
+        test_skill_data,  test_answer_data, test_diff_data = dat.load_data(test_data_path)
 
         # early stopping
         early_stopping = EarlyStopping(patience=20, verbose=True)
@@ -127,6 +152,7 @@ if __name__ == '__main__':
             np.random.shuffle(shuffled_ind)
             train_skill_data = train_skill_data[shuffled_ind, :]
             train_answer_data = train_answer_data[shuffled_ind, :]
+            train_diff_data = train_diff_data[shuffled_ind, :]
             
             net.train()
             
@@ -138,25 +164,30 @@ if __name__ == '__main__':
                 optimizer.zero_grad()
                 train_batch_skill   = train_skill_data[idx*params.batch_size:(idx+1)*params.batch_size]
                 train_batch_answer  = train_answer_data[idx*params.batch_size:(idx+1)*params.batch_size]
+                train_batch_diff = train_diff_data[idx*params.batch_size:(idx+1)*params.batch_size]
                 
                 skill = torch.LongTensor(train_batch_skill)
                 answer = torch.LongTensor(train_batch_answer)
+                diff = torch.LongTensor(train_batch_diff)
                 skill = torch.where(skill==-1, torch.tensor([params.n_skill]), skill)
                 answer = torch.where(answer==-1, torch.tensor([2]), answer)
-                skill, answer = skill.to(device),answer.to(device)
+                diff = torch.where(diff==-1, torch.tensor([11]), diff)
+                skill, answer, diff = skill.to(device),answer.to(device), diff.to(device)
       
-                pred_res, features = net(skill, answer)
+                pred_res, features = net(skill, answer, diff)
                 loss, y_pred, y_true = kt_loss(pred_res, answer)
          
                 features_grad = grad(loss, features, retain_graph=True)
                 p_adv = torch.FloatTensor(params.epsilon * _l2_normalize_adv(features_grad[0].data))
                 p_adv = Variable(p_adv).to(device)
-                pred_res, features = net(skill, answer, p_adv)
+                pred_res, features = net(skill, answer, diff, p_adv)
                 adv_loss, _ , _ = kt_loss(pred_res, answer)
+                
 
                 total_loss=loss+ params.beta*adv_loss
                 total_loss.backward()
                 optimizer.step()
+                
                 
                 y_pred_train_list.append(y_pred.cpu().detach().numpy())
                 y_true_train_list.append(y_true.cpu().detach().numpy())
@@ -178,14 +209,17 @@ if __name__ == '__main__':
                 for idx in range(val_N):
                     val_batch_skill   = val_skill_data[idx*params.batch_size:(idx+1)*params.batch_size]
                     val_batch_answer  = val_answer_data[idx*params.batch_size:(idx+1)*params.batch_size]
+                    val_batch_diff = val_diff_data[idx*params.batch_size:(idx+1)*params.batch_size]
                     
                     skill=torch.LongTensor(val_batch_skill)
                     answer=torch.LongTensor(val_batch_answer)
+                    diff=torch.LongTensor(val_batch_diff)
                     skill = torch.where(skill==-1, torch.tensor([params.n_skill]), skill)
                     answer = torch.where(answer==-1, torch.tensor([2]), answer)
-                    skill,answer=skill.to(device),answer.to(device)
+                    diff = torch.where(diff==-1, torch.tensor([11]), diff)
+                    skill,answer,diff=skill.to(device),answer.to(device),diff.to(device)
                     
-                    pred_res, features = net(skill, answer)
+                    pred_res, features = net(skill, answer, diff)
                     loss, y_pred, y_true = kt_loss(pred_res, answer)
                     
                     val_total_loss.append(loss.item())
@@ -210,7 +244,7 @@ if __name__ == '__main__':
                 del auc_train
                 del auc_val
                 gc.collect()
-                torch.cuda.empty_cache()
+                # torch.mps.empty_cache()
                 
         # test
         load_model_path=os.path.join(save_model_file, 'kt_model_best.pt')
@@ -223,14 +257,17 @@ if __name__ == '__main__':
             for idx in range(test_N):
                 test_batch_skill   = test_skill_data[idx*params.batch_size:(idx+1)*params.batch_size]
                 test_batch_answer  = test_answer_data[idx*params.batch_size:(idx+1)*params.batch_size]
+                test_batch_diff  = test_diff_data[idx*params.batch_size:(idx+1)*params.batch_size]
                 
                 skill=torch.LongTensor(test_batch_skill)
                 answer=torch.LongTensor(test_batch_answer)
+                diff=torch.LongTensor(test_batch_diff)
                 skill = torch.where(skill==-1, torch.tensor([params.n_skill]), skill)
                 answer = torch.where(answer==-1, torch.tensor([2]), answer)
-                skill,answer=skill.to(device),answer.to(device)
+                diff = torch.where(diff==-1, torch.tensor([11]), diff)
+                skill,answer,diff=skill.to(device),answer.to(device),diff.to(device)
                 
-                pred_res, features = net(skill, answer)
+                pred_res, features = net(skill, answer, diff)
                 loss, y_pred, y_true = kt_loss(pred_res, answer)
                 
                 y_true_test_list.append(y_true.cpu().detach().numpy())
@@ -247,7 +284,7 @@ if __name__ == '__main__':
 
             del auc_test
             gc.collect()
-            torch.cuda.empty_cache()
+            # torch.mps.empty_cache()
     print('average test auc:', np.round(np.mean(auc_test_list), decimals = 4), u'\u00B1', np.round(np.std(auc_test_list), decimals = 4))
     print('average test auc:', np.round(np.mean(auc_test_list), decimals = 4), u'\u00B1', np.round(np.std(auc_test_list), decimals = 4), file=log)
     
